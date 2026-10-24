@@ -34,7 +34,7 @@ Additional:
 
 def display_preds(preds, name):
     plt.figure(figsize=(12, 7))
-    plt.bar(samples.keys(), preds, color=["#00bfff", "#00bfff", "#ffe600", "#ffe600","#00bfff", "#00bfff", "#ffe600", "#ffe600", "#00bfff", "#00bfff"])
+    plt.bar(samples.keys(), preds, color=["#00bfff", "#00bfff", "#ffe600", "#ffe600","#00bfff","#00bfff", "#ffe600", "#ffe600","#c96eac","#c96eac","#c96eac"])
     plt.ylabel(f"Predicted Tumor Fraction - {name}")
     plt.title(f"Predicted Tumor Fraction for Each Sample - {name}")  
     plt.show()
@@ -111,26 +111,29 @@ def create_synthetic_mixtures(rb_vals):
     return true_tfs, np.array(synthetic_matrix)
 
 
+def load_patient_idat(path, probes):
+    methyl_data = mepylome.MethylData(file=path)
 
+    
+
+    methylated_signals   = methyl_data.methylated_df.loc[probes]
+    unmethylated_signals = methyl_data.unmethylated_df.loc[probes]
+    suffix = path.split("/")[2].split(".")[0][0:-4]
+    probes_betas = {
+        x:float(methylated_signals.loc[x][suffix] / (methylated_signals.loc[x][suffix] + unmethylated_signals.loc[x][suffix] + 100))
+        for x in probes
+        }
+    beta_vals = list(probes_betas.values())
+    return beta_vals
 """
 DATA LOADING SECTION
 Load betas of a sample
 """
 #Load IDAT and then get beta values
-methyl_data = mepylome.MethylData(file='methyl_data/205648300012_R03C01_Red.idat')
 
+print("------------------------------")
 probes, model, scaler = reconstruct_model("model_and_scaler_50.json")
 
-methylated_signals   = methyl_data.methylated_df.loc[probes]
-unmethylated_signals = methyl_data.unmethylated_df.loc[probes]
-
-probes_betas = {
-    x:float(methylated_signals.loc[x]["205648300012_R03C01"]/(methylated_signals.loc[x]["205648300012_R03C01"]+unmethylated_signals.loc[x]["205648300012_R03C01"]+100))
-    for x in probes
-    }
-
-beta_vals = list(probes_betas.values())
-rb_vals = list(pd.read_csv('top_50_probes_probe_beta_pairs.csv')["beta_rb"]) #synthetic retinoblastoma case
 
 samples = {}
 with open("pilot_8samples_merged.csv", 'r') as file:
@@ -145,8 +148,11 @@ with open("pilot_8samples_merged.csv", 'r') as file:
                     samples[labels[j]].append(float(line[j]))
                 else:
                     samples[labels[j]] = [float(line[j])]
-samples["IDAT_23"] = beta_vals
-samples["RB_mean"] = rb_vals
+
+samples["IDAT_23"] = load_patient_idat(path="methyl_data/sample_23/205648300012_R01C01_Red.idat", probes = probes)
+print("passed")
+samples["IDAT_24"] = load_patient_idat(path='methyl_data/sample_24/205648300012_R03C01_Red.idat', probes = probes)
+samples["IDAT_25"] = load_patient_idat(path="methyl_data/sample_25/205648300012_R04C01_Red.idat", probes = probes)
 
 for i in samples:
     print(i)
@@ -157,12 +163,12 @@ below is evaluation code across the samples, plus gap between cancer and wt
 """
 
 #predict betas
-print(model.predict_proba(scaler.transform([beta_vals]))[0][1]) 
-print(model.predict_proba(scaler.transform([rb_vals]))[0][1])
 
 #begin evaluating betas
 
-preds = [x[1] for x in model.predict_proba(scaler.transform([samples[i] for i in samples]))]
+preds = [float(x[1]) for x in model.predict_proba(scaler.transform([samples[i] for i in samples]))]
+for i, j in zip(samples.keys(), preds):
+    print(f"{i}: {j:.4f}")
 display_preds(preds, f"logistic regression results")
 
 """
@@ -171,7 +177,9 @@ below is synthetic eval code for both
 
 print("First eval on average RB, then beta of target ")
 
-for sample, name in zip((rb_vals, beta_vals), ["IDAT_23", "RB_mean"]):
+#use samples
+for name in ["IDAT_23", "IDAT_24", "IDAT_25"]:
+    sample = samples[name]
     
     print(f"Synthetic Evals - {name}")
 
@@ -181,9 +189,9 @@ for sample, name in zip((rb_vals, beta_vals), ["IDAT_23", "RB_mean"]):
     #we have tumor fractions now
 
     ccc = evaluate_stratified_ccc(true_tfs, preds)
-    print(f"Concordance Corelation Coefficients")
+    print(f"Concordance Correlation Coefficients")
     for i in ccc:
-        print(f"{i} {ccc[i]}")
+        print(f"{i} {ccc[i]:.4f}")
 
     #plot
 
