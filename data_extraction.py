@@ -9,7 +9,31 @@ from rpy2.robjects import pandas2ri
 import pandas as pd
 import numpy as np
 
+SAMPLE_COLORS = {
+   "RB reference": "#00bfff",
+   "Normal blood": "#ffe600",
+   "RB cell line": "#00bfff",
+   "Uveal melanoma": "#ffe600",
+   "Unlabeled patient IDAT": "#c96eac",
+}
 
+
+def sample_group(sample):
+   if sample in ("RB_022_OS_DX", "RB_028_OD_DX"):
+       return "RB reference"
+   if sample in ("Blood_022", "Blood_048"):
+       return "Normal blood"
+   if sample in ("WERI1", "Y79"):
+       return "RB cell line"
+   if sample in ("UM_005", "UM_007"):
+       return "Uveal melanoma"
+   if sample.startswith("IDAT_"):
+       return "Unlabeled patient IDAT"
+   return "Unclassified"
+
+
+def sample_color(sample):
+   return SAMPLE_COLORS.get(sample_group(sample), "#808080")
 
 
 def rdata_to_dataframe(rdata_path):
@@ -61,7 +85,7 @@ def load_signals(file_path):
    signals = {}
    with open(file_path, 'r') as f:
        lines = f.read().strip().split('\n')
-       header = lines[0].strip().split('\t')[1:]  # sample names
+       header = lines[0].strip().split('\t')  # sample names
        for line in lines[1:]:
            if not line.strip():
                continue
@@ -72,3 +96,20 @@ def load_signals(file_path):
    return signals, header
 
 
+def load_pilot_samples(file_path, probes):
+   """Load pilot samples with values ordered exactly as the requested probes."""
+   df = pd.read_csv(file_path)
+   if 'ProbeID' not in df.columns:
+       raise ValueError(f"{file_path} must contain a ProbeID column")
+   if df['ProbeID'].duplicated().any():
+       raise ValueError(f"{file_path} contains duplicate ProbeID values")
+
+   df = df.set_index('ProbeID')
+   missing_probes = [probe for probe in probes if probe not in df.index]
+   if missing_probes:
+       raise ValueError(f"{file_path} is missing {len(missing_probes)} requested probes")
+
+   return {
+       sample: df.loc[list(probes), sample].astype(float).tolist()
+       for sample in df.columns
+   }

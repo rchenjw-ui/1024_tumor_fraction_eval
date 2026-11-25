@@ -1,10 +1,33 @@
 import json
 from pathlib import Path
+from functools import lru_cache
 import sklearn
 import numpy as np 
 import pandas as pd
 import mepylome
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+try:
+    from .data_extraction import load_pilot_samples, sample_color
+except ImportError:
+    from data_extraction import load_pilot_samples, sample_color
+
+ROOT = Path(__file__).resolve().parent
+IDAT_PATHS = {
+    "IDAT_23": ROOT / "methyl_data/sample_23/205648300012_R01C01_Red.idat",
+    "IDAT_24": ROOT / "methyl_data/sample_24/205648300012_R03C01_Red.idat",
+    "IDAT_25": ROOT / "methyl_data/sample_25/205648300012_R04C01_Red.idat",
+}
+SAMPLE_GROUPS = {
+    "RB_022_OS_DX": "RB reference",
+    "RB_028_OD_DX": "RB reference",
+    "Blood_022": "Normal blood",
+    "Blood_048": "Normal blood",
+    "WERI1": "RB cell line",
+    "Y79": "RB cell line",
+    "UM_005": "Uveal melanoma",
+    "UM_007": "Uveal melanoma",
+}
 
 """
 - Uses the saved model
@@ -32,13 +55,20 @@ Additional:
     https://www.nature.com/articles/s41467-022-33248-2
 """
 
-def display_preds(preds, name):
-    plt.figure(figsize=(12, 7))
-    plt.bar(samples.keys(), preds, color=["#00bfff", "#00bfff", "#ffe600", "#ffe600","#00bfff","#00bfff", "#ffe600", "#ffe600","#c96eac","#c96eac","#c96eac"])
-    plt.ylabel(f"Predicted Tumor Fraction - {name}")
-    plt.title(f"Predicted Tumor Fraction for Each Sample - {name}")  
-    plt.show()
-    plt.savefig(f"predicted_tumor_fraction_barplot_{name}.png")
+
+def display_preds(samples, preds, name):
+    fig, ax = plt.subplots(figsize=(12, 7))
+    ax.bar(samples.keys(), preds, color=[sample_color(sample) for sample in samples])
+    ax.set_ylabel("Methylation RB TFX")
+    ax.set_title(f"Estimated TFX by RB methylation similarity - {name}")
+    ax.tick_params(axis="x", labelrotation=35)
+    ax.legend(handles=[
+        Patch(facecolor="#00bfff", label="RB references / cell lines"),
+        Patch(facecolor="#ffe600", label="Blood / uveal melanoma controls"),
+        Patch(facecolor="#c96eac", label="Unlabeled patient IDATs"),
+    ])
+    fig.tight_layout()
+    fig.savefig(ROOT / f"results/patient_data_{name}_tumor_fraction_barplot.png")
     plt.close()
 
 #lin's CCC: used to see how closely matched to real across synthetic
@@ -88,17 +118,19 @@ def reconstruct_model(path):
     scaler.n_samples_seen_ = 1
 
     model = sklearn.linear_model.LogisticRegression()
-    model.coef_ = np.array(params)
+    model.coef_ = np.array(params).reshape(1, -1)
     model.intercept_ = data["model_int"]
     model.classes_ = np.array([0, 1]) 
     return probes, model, scaler
 
 
 
-def create_synthetic_mixtures(rb_vals):
-    probes_df = pd.read_csv('top_50_probes_probe_beta_pairs.csv')
+def create_synthetic_mixtures(rb_vals, n_probes):
+    probes_df = pd.read_csv(ROOT / f'probe_sets/top_{n_probes}_probes_probe_beta_pairs.csv')
     probes = probes_df["probe"].tolist()
     wt_vals = probes_df["beta_wt"].tolist()
+    if len(rb_vals) != len(probes):
+        raise ValueError(f"Expected {len(probes)} tumor beta values; received {len(rb_vals)}")
     
     # 101 points provides fine increments (0.00, 0.01, ..., 1.00)
     true_tfs = np.linspace(0.0, 1.0, 101)
@@ -111,101 +143,115 @@ def create_synthetic_mixtures(rb_vals):
     return true_tfs, np.array(synthetic_matrix)
 
 
+@lru_cache(maxsize=3)
+def _read_idat(path):
+    return mepylome.MethylData(file=path)
+
+
 def load_patient_idat(path, probes):
-    methyl_data = mepylome.MethylData(file=path)
-
-    
-
+    path = Path(path).resolve()
+    methyl_data = _read_idat(str(path))
     methylated_signals   = methyl_data.methylated_df.loc[probes]
     unmethylated_signals = methyl_data.unmethylated_df.loc[probes]
-    suffix = path.split("/")[2].split(".")[0][0:-4]
+    suffix = path.stem.removesuffix("_Red")
+    if suffix not in methylated_signals.columns:
+        raise KeyError(f"IDAT sample {suffix!r} is not present in {path}")
     probes_betas = {
         x:float(methylated_signals.loc[x][suffix] / (methylated_signals.loc[x][suffix] + unmethylated_signals.loc[x][suffix] + 100))
         for x in probes
         }
     beta_vals = list(probes_betas.values())
     return beta_vals
-"""
-DATA LOADING SECTION
-Load betas of a sample
-"""
-#Load IDAT and then get beta values
-
-print("------------------------------")
-probes, model, scaler = reconstruct_model("model_and_scaler_50.json")
+def load_sample(probes, path=None):
+    pilot_path = Path(path) if path is not None else ROOT / "pilot_8samples_merged.csv"
+    samples = load_pilot_samples(pilot_path, probes)
+    for sample_name, idat_path in IDAT_PATHS.items():
+        samples[sample_name] = load_patient_idat(idat_path, probes)
+    return samples
 
 
-samples = {}
-with open("pilot_8samples_merged.csv", 'r') as file:
-    #create dictionary, sample_wise probe addition
-    file = file.read().splitlines()
-    labels = file[0].split(",")
-    for i in file[1:]:
-        line = i.split(',')
-        if line[0] in probes:
-            for j in range(1,len(line)):
-                if labels[j] in samples:
-                    samples[labels[j]].append(float(line[j]))
-                else:
-                    samples[labels[j]] = [float(line[j])]
+def _sample_group(sample):
+    if sample in SAMPLE_GROUPS:
+        return SAMPLE_GROUPS[sample]
+    if sample.startswith("IDAT_"):
+        return "Unlabeled patient IDAT"
+    return "Unclassified"
 
-samples["IDAT_23"] = load_patient_idat(path="methyl_data/sample_23/205648300012_R01C01_Red.idat", probes = probes)
-print("passed")
-samples["IDAT_24"] = load_patient_idat(path='methyl_data/sample_24/205648300012_R03C01_Red.idat', probes = probes)
-samples["IDAT_25"] = load_patient_idat(path="methyl_data/sample_25/205648300012_R04C01_Red.idat", probes = probes)
 
-for i in samples:
-    print(i)
-    print(len(samples[i]))
+def _safe_ratio(numerator, denominator):
+    return float(numerator / denominator) if denominator != 0 else np.nan
 
-"""
-below is evaluation code across the samples, plus gap between cancer and wt
-"""
 
-#predict betas
+def evaluate_saved_models():
+    results_dir = ROOT / "results"
+    results_dir.mkdir(exist_ok=True)
+    score_rows = []
+    metric_rows = []
 
-#begin evaluating betas
+    positive_samples = ["RB_022_OS_DX", "RB_028_OD_DX", "WERI1", "Y79"]
+    normal_samples = ["Blood_022", "Blood_048"]
+    um_samples = ["UM_005", "UM_007"]
+    non_rb_samples = normal_samples + um_samples
 
-preds = [float(x[1]) for x in model.predict_proba(scaler.transform([samples[i] for i in samples]))]
-for i, j in zip(samples.keys(), preds):
-    print(f"{i}: {j:.4f}")
-display_preds(preds, f"logistic regression results")
+    model_paths = sorted(
+        (ROOT / "models").glob("model_and_scaler_*.json"),
+        key=lambda path: int(path.stem.rsplit("_", 1)[1]),
+    )
+    for model_path in model_paths:
+        n_probes = int(model_path.stem.rsplit("_", 1)[1])
+        probes, model, scaler = reconstruct_model(model_path)
+        samples = load_sample(probes)
+        sample_names = list(samples)
+        x = scaler.transform([samples[sample] for sample in sample_names])
+        predictions = model.predict_proba(x)[:, 1]
+        scores = dict(zip(sample_names, predictions))
 
-"""
-below is synthetic eval code for both
-"""
+        for sample, score in scores.items():
+            score_rows.append({
+                "model_probes": n_probes,
+                "sample": sample,
+                "group": _sample_group(sample),
+                "tumor_fraction": float(score),
+            })
 
-print("First eval on average RB, then beta of target ")
+        positive_scores = [scores[sample] for sample in positive_samples]
+        normal_scores = [scores[sample] for sample in normal_samples]
+        um_scores = [scores[sample] for sample in um_samples]
+        non_rb_scores = [scores[sample] for sample in non_rb_samples]
+        mean_rb = float(np.mean([scores[sample] for sample in positive_samples[:2]]))
+        metrics = {
+            "model_probes": n_probes,
+            "min_RB_or_cellline_minus_max_non_RB": float(min(positive_scores) - max(non_rb_scores)),
+            "min_RB_or_cellline_minus_max_blood": float(min(positive_scores) - max(normal_scores)),
+            "mean_RB_or_cellline_tfx": float(np.mean(positive_scores)),
+            "mean_normal_blood_tfx": float(np.mean(normal_scores)),
+            "mean_RB_or_cellline_minus_normal_blood": float(np.mean(positive_scores) - np.mean(normal_scores)),
+            "mean_UM_to_mean_RB_tfx_ratio": _safe_ratio(float(np.mean(um_scores)), mean_rb),
+        }
 
-#use samples
-for name in ["IDAT_23", "IDAT_24", "IDAT_25"]:
-    sample = samples[name]
-    
-    print(f"Synthetic Evals - {name}")
+        for sample in IDAT_PATHS:
+            true_tfs, synthetic = create_synthetic_mixtures(samples[sample], n_probes)
+            synthetic_predictions = model.predict_proba(scaler.transform(synthetic))[:, 1]
+            metrics[f"{sample}_synthetic_Lin_CCC"] = float(lins_ccc(true_tfs, synthetic_predictions))
 
-    true_tfs, synthetic = create_synthetic_mixtures(sample)
+        metric_rows.append(metrics)
+        display_preds(samples, predictions, f"{n_probes}_probes")
 
-    preds = model.predict_proba(scaler.transform(synthetic))[:, 1]
-    #we have tumor fractions now
+    score_df = pd.DataFrame(score_rows)
+    score_matrix = score_df.pivot(
+        index="model_probes",
+        columns="sample",
+        values="tumor_fraction",
+    ).reset_index()
+    metrics_df = pd.DataFrame(metric_rows)
+    score_df.to_csv(results_dir / "sample_scores_long.csv", index=False)
+    score_matrix.to_csv(results_dir / "sample_scores_matrix.csv", index=False)
+    metrics_df.to_csv(results_dir / "evaluation_metrics_matrix.csv", index=False)
+    print("Tumor fractions:")
+    print(score_matrix.to_string(index=False))
+    print("Evaluation metrics:")
+    print(metrics_df.to_string(index=False))
 
-    ccc = evaluate_stratified_ccc(true_tfs, preds)
-    print(f"Concordance Correlation Coefficients")
-    for i in ccc:
-        print(f"{i} {ccc[i]:.4f}")
 
-    #plot
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    # Plot vertical bars
-    bars = ax.bar(true_tfs, list(preds), color='skyblue', edgecolor='black', width=0.01)
-    # Customizations
-    ax.set_title(f'synthetic tfx vs predicted - {name}')
-    plt.plot(true_tfs, true_tfs, color='green', label=f'Reference line')
-
-    ax.set_xlabel("synthetic tfx")
-    ax.set_ylabel('predicted tfx')
-
-    fig.show()
-    plt.show()
-    print("\n")
+if __name__ == "__main__":
+    evaluate_saved_models()
