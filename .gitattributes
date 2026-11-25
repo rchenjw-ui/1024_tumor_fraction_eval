@@ -1,3 +1,9 @@
 embryo_data/** filter=lfs diff=lfs merge=lfs -text
 methyl_data/** filter=lfs diff=lfs merge=lfs -text
 tumor_data/** filter=lfs diff=lfs merge=lfs -text
+*./RData filter=lfs diff=lfs merge=lfs -text
+*/.txt filter=lfs diff=lfs merge=lfs -text
+*/.RData filter=lfs diff=lfs merge=lfs -text
+*/.idat filter=lfs diff=lfs merge=lfs -text
+*/.csv filter=lfs diff=lfs merge=lfs -text
+*/.xlsx filter=lfs diff=lfs merge=lfs -text
